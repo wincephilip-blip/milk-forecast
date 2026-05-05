@@ -1,0 +1,74 @@
+# =====================================================================
+# milkfc / Milk Forecast — .gitignore
+# 用途：避免把敏感個資、訓練產物、虛擬環境推到公開 GitHub repo
+# =====================================================================
+
+# ---- 個資與原始資料（絕對不推）----
+raw_data/
+snapshots/
+lightning_logs/
+*.pkl
+
+# ---- 含 farm_id / cow_id 的儀表板（不推）----
+dashboard.html
+seasonal.html
+lactation.html
+
+# ---- 含實測 farm 資訊的快照 ----
+**/active_cows_snapshot.*
+**/calvings.*
+**/cow_effects.*
+**/farm_effects.*
+**/dhi_*.pkl
+
+# ---- 論文草稿（投稿前不公開）----
+reports/paper_draft.docx
+reports/paper_part1_draft.docx
+reports/*_draft.docx
+
+# ---- Python 環境與快取 ----
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# ---- Node.js（為了 reports/gen_paper.js）----
+node_modules/
+package-lock.json
+
+# ---- 環境變數與密鑰 ----
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets.json
+
+# ---- macOS / Windows / IDE ----
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- 部署暫存 ----
+/tmp/milkfc-deploy/
+
+# ---- 日誌與輸出 ----
+*.log
+*.out
+logs/
+
+# ---- 大型測試資料 ----
+*.h5
+*.hdf5
+*.parquet
