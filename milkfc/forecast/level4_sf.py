@@ -245,10 +245,38 @@ def apply_l4_calibration(results: dict, dhi_panel: dict = None,
                         "annual_total_tons": cohort_r.get("annual_total_tons"),
                         "target_year": target_year,
                     })
-                    log.info(f"  Cohort 加入：年產量 "
+                    log.info(f"  Cohort v1 加入：年產量 "
                               f"{cohort_r['annual_total_tons']/10000:.1f} 萬公噸")
             except Exception as e:
-                log.warning(f"  Cohort 失敗、跳過: {e}")
+                log.warning(f"  Cohort v1 失敗、跳過: {e}")
+
+            # cohort v2 (n=quarterly + r=adaptive ensemble + as_of=today auto nowcast)
+            try:
+                from .cohort_model_v2 import forecast_cohort_v2
+                from datetime import date
+                v2_r = forecast_cohort_v2(
+                    target_year=target_year,
+                    n_projection='quarterly',
+                    r_window='adaptive',
+                    as_of_date=date.today().isoformat(),
+                    nowcast_mode='auto')
+                if v2_r.get("success"):
+                    models_cal.append({
+                        "model": "cohort_v2_auto",
+                        "success": True,
+                        "in_sample_mape": v2_r["in_sample_mape"],
+                        "forecast": v2_r["forecast"],
+                        "is_national": True,
+                        "predicted_cows": v2_r.get("predicted_cows"),
+                        "predicted_daily_yield_kg": v2_r.get("predicted_daily_yield_kg"),
+                        "annual_total_tons": v2_r.get("annual_total_tons"),
+                        "target_year": target_year,
+                        "v2_config": v2_r.get("v2_config", {}),
+                    })
+                    log.info(f"  Cohort v2 加入：年產量 "
+                              f"{v2_r['annual_total_tons']/10000:.1f} 萬公噸")
+            except Exception as e:
+                log.warning(f"  Cohort v2 失敗、跳過: {e}")
 
     # === 階段一：bias 校正（依 holdout backtest 每個模型的 bias）===
     bias_applied = {}

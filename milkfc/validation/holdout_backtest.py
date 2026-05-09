@@ -285,7 +285,7 @@ def run_holdout_backtest(holdout_years: list = None,
                 err = (pred * sf_used - official_y) / official_y * 100
                 by_model_errors[m].append(err)
 
-        # === 階段二：Cohort 結構模型 backtest ===
+        # === 階段二：Cohort 結構模型 backtest（v1 simple）===
         if with_cohort and official_y:
             try:
                 from ..forecast.cohort_model import forecast_cohort_simple
@@ -296,12 +296,35 @@ def run_holdout_backtest(holdout_years: list = None,
                     cohort_pred_tons = cohort_r["annual_total_tons"]
                     cohort_err = (cohort_pred_tons - official_y) / official_y * 100
                     by_model_errors["cohort_simple"].append(cohort_err)
-                    log.info(f"  Cohort 預測 = {cohort_pred_tons:,.0f} 公噸 "
+                    log.info(f"  Cohort v1 預測 = {cohort_pred_tons:,.0f} 公噸 "
                               f"（誤差 {cohort_err:+.1f}%）")
                     rows[-1]["cohort_predicted_tons"] = cohort_pred_tons
                     rows[-1]["cohort_err_pct"] = cohort_err
             except Exception as e:
-                log.warning(f"  Cohort backtest 失敗: {e}")
+                log.warning(f"  Cohort v1 backtest 失敗: {e}")
+
+        # === 階段三：Cohort v2 auto（n=quarterly + r=adaptive ensemble）===
+        # 為公平比較，回測一律純外推（as_of=cutoff，無 target year 資料）
+        if with_cohort and official_y:
+            try:
+                from ..forecast.cohort_model_v2 import forecast_cohort_v2
+                v2_r = forecast_cohort_v2(
+                    target_year=y, horizon_months=12,
+                    history_max_year=y - 1,
+                    n_projection='quarterly',
+                    r_window='adaptive',
+                    as_of_date=str(cutoff.date()),  # 純外推
+                    nowcast_mode='auto')  # auto 在 cutoff 看不到 target year 資料、退化純外推
+                if v2_r.get("success"):
+                    v2_pred = v2_r["annual_total_tons"]
+                    v2_err = (v2_pred - official_y) / official_y * 100
+                    by_model_errors["cohort_v2_auto"].append(v2_err)
+                    log.info(f"  Cohort v2 (auto) 預測 = {v2_pred:,.0f} 公噸 "
+                              f"（誤差 {v2_err:+.1f}%）")
+                    rows[-1]["cohort_v2_predicted_tons"] = v2_pred
+                    rows[-1]["cohort_v2_err_pct"] = v2_err
+            except Exception as e:
+                log.warning(f"  Cohort v2 backtest 失敗: {e}")
 
     # Summary
     dhi_errs = [abs(r["dhi_err_pct"]) for r in rows

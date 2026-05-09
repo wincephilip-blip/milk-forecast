@@ -117,81 +117,64 @@ def _in_sample_mape_naive(series, lookback=12):
 
 def forecast_stl_linear(series: pd.Series, horizon: int = 12,
                           season_period: int = 12) -> dict:
-    """純 numpy 的 STL 分解 + 線性趨勢外推。
+    """STL 分解（statsmodels.tsa.seasonal.STL）+ 線性趨勢外推。
 
-    步驟:
-      1. 用 12 月移動平均提取趨勢
-      2. 從去趨勢殘差算每月平均（季節）
-      3. 殘差 = 原始 - 趨勢 - 季節
-      4. 預測 = 線性外推趨勢 + 季節 repeat + 不確定性
+    使用 statsmodels 之 STL 做 LOESS-based 分解，
+    然後對 trend 線性外推、season 取最後一個 cycle 重複、residual 給不確定性。
     """
+    try:
+        from statsmodels.tsa.seasonal import STL
+    except ImportError:
+        return {"model": "stl_linear", "success": False,
+                "error": "statsmodels not installed"}
+
     if len(series) < season_period * 2:
         return None
 
     y = series.values.astype(float)
     n = len(y)
 
-    # 趨勢：12 月對稱移動平均
-    trend = np.full(n, np.nan)
-    half = season_period // 2
-    for i in range(half, n - half):
-        trend[i] = np.mean(y[i-half:i+half+1])
-    # 邊界用線性外推
-    valid = ~np.isnan(trend)
-    if valid.sum() < 12:
-        return None
-    x = np.arange(n)
-    coef = np.polyfit(x[valid], trend[valid], 1)
-    trend_filled = trend.copy()
-    trend_filled[~valid] = coef[0] * x[~valid] + coef[1]
+    try:
+        stl_result = STL(y, period=season_period, robust=True).fit()
+        trend = stl_result.trend
+        seasonal = stl_result.seasonal
+        residual = stl_result.resid
 
-    # 去趨勢殘差
-    detrended = y - trend_filled
+        x = np.arange(n)
+        coef = np.polyfit(x, trend, 1)
+        sigma = float(np.std(residual))
 
-    # 季節成分：每月平均
-    months = np.array([int(idx.split("-")[1]) for idx in series.index])
-    seasonal = np.zeros(season_period)
-    for m in range(1, 13):
-        mask = months == m
-        if mask.any():
-            seasonal[m-1] = detrended[mask].mean()
-    # 標準化使 seasonal 加總為 0
-    seasonal -= seasonal.mean()
+        last_idx = pd.Period(series.index[-1])
+        forecast = []
+        for h in range(1, horizon + 1):
+            future_pd = last_idx + h
+            future_x = n + h - 1
+            trend_h = coef[0] * future_x + coef[1]
+            # 季節項取最後一個完整 cycle 的對應位置
+            season_idx = (n - season_period) + ((h - 1) % season_period)
+            season_h = float(seasonal[season_idx]) if 0 <= season_idx < n else 0.0
+            p50 = float(trend_h + season_h)
+            forecast.append({
+                "yyyymm": future_pd.strftime("%Y-%m"),
+                "p50": p50,
+                "p10": p50 - 1.28 * sigma,
+                "p90": p50 + 1.28 * sigma,
+            })
 
-    # 殘差
-    residual = detrended - np.array([seasonal[m-1] for m in months])
-    sigma = residual.std()
+        fitted = trend + seasonal
+        err = ((fitted - y) / y).clip(-1, 1)
+        in_sample = float(np.abs(err).mean()) * 100
 
-    # 預測
-    last_idx = pd.Period(series.index[-1])
-    forecast = []
-    for h in range(1, horizon + 1):
-        future_pd = last_idx + h
-        future_month = future_pd.month
-        future_x = n + h - 1
-        trend_h = coef[0] * future_x + coef[1]
-        season_h = seasonal[future_month - 1]
-        p50 = trend_h + season_h
-        forecast.append({
-            "yyyymm": future_pd.strftime("%Y-%m"),
-            "p50": p50,
-            "p10": p50 - 1.28 * sigma,  # ~10th percentile assuming normal
-            "p90": p50 + 1.28 * sigma,
-        })
-
-    # In-sample MAPE
-    fitted = trend_filled + np.array([seasonal[m-1] for m in months])
-    err = ((fitted - y) / y).clip(-1, 1)
-    in_sample = float(np.abs(err).mean()) * 100
-
-    return {
-        "model": "stl_linear",
-        "forecast": forecast,
-        "in_sample_mape": in_sample,
-        "trend_slope_per_month": float(coef[0]),
-        "trend_per_year_pct": float(coef[0] * 12 / np.mean(y) * 100),
-        "success": True,
-    }
+        return {
+            "model": "stl_linear",
+            "forecast": forecast,
+            "in_sample_mape": in_sample,
+            "trend_slope_per_month": float(coef[0]),
+            "trend_per_year_pct": float(coef[0] * 12 / np.mean(y) * 100),
+            "success": True,
+        }
+    except Exception as e:
+        return {"model": "stl_linear", "success": False, "error": str(e)}
 
 
 def forecast_holt_winters(series: pd.Series, horizon: int = 12) -> dict:
@@ -239,14 +222,19 @@ def forecast_holt_winters(series: pd.Series, horizon: int = 12) -> dict:
         return {"model": "holt_winters", "success": False, "error": str(e)}
 
 
-def forecast_sarima(series: pd.Series, horizon: int = 12,
-                     order=(1, 1, 1), seasonal_order=(1, 1, 1, 12)) -> dict:
-    """SARIMA 模型（典型參數）。"""
+def forecast_sarima(series: pd.Series, horizon: int = 12) -> dict:
+    """SARIMA 模型（pmdarima.auto_arima 自動選階）。
+
+    用 pmdarima.auto_arima 對 (p, d, q)(P, D, Q)_12 做網格搜尋：
+      - 以 KPSS 檢定決定差分階數 d、OCSB 決定季節差分 D
+      - 以 AIC 選最佳 (p, q, P, Q)
+      - 搜尋範圍：p ≤ 3, q ≤ 3, P ≤ 2, Q ≤ 2
+    """
     try:
-        from statsmodels.tsa.statespace.sarimax import SARIMAX
+        import pmdarima as pm
     except ImportError:
         return {"model": "sarima", "success": False,
-                "error": "statsmodels not installed"}
+                "error": "pmdarima not installed (pip install pmdarima)"}
 
     if len(series) < 24:
         return None
@@ -254,12 +242,23 @@ def forecast_sarima(series: pd.Series, horizon: int = 12,
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            model = SARIMAX(series.values, order=order, seasonal_order=seasonal_order,
-                            enforce_stationarity=False, enforce_invertibility=False)
-            fit = model.fit(disp=False, maxiter=200)
-            fc_obj = fit.get_forecast(horizon)
-            mean = fc_obj.predicted_mean
-            ci = fc_obj.conf_int(alpha=0.20)  # 80% CI ≈ p10-p90
+            arima = pm.auto_arima(
+                series.values,
+                start_p=0, max_p=3,
+                start_q=0, max_q=3,
+                start_P=0, max_P=2,
+                start_Q=0, max_Q=2,
+                d=None, D=None,           # 由 KPSS 與 OCSB 自動決定
+                m=12,                      # 月度季節
+                seasonal=True,
+                test="kpss", seasonal_test="ocsb",
+                information_criterion="aic",
+                stepwise=True,
+                suppress_warnings=True,
+                error_action="ignore",
+                maxiter=200,
+            )
+            mean, ci = arima.predict(n_periods=horizon, return_conf_int=True, alpha=0.20)
 
         last_idx = pd.Period(series.index[-1])
         forecast = []
@@ -271,16 +270,20 @@ def forecast_sarima(series: pd.Series, horizon: int = 12,
                 "p90": float(ci[h][1]),
             })
 
-        # In-sample MAPE
-        fitted = fit.fittedvalues
-        err = (fitted - series.values) / series.values
+        in_sample_pred = arima.predict_in_sample()
+        err = (in_sample_pred - series.values) / series.values
         in_sample = float(np.abs(err[~np.isnan(err)]).mean() * 100)
+
+        order = arima.order
+        seasonal_order = arima.seasonal_order
 
         return {
             "model": "sarima",
             "forecast": forecast,
             "in_sample_mape": in_sample,
-            "aic": float(fit.aic),
+            "aic": float(arima.aic()),
+            "selected_order": list(order),
+            "selected_seasonal_order": list(seasonal_order),
             "success": True,
         }
     except Exception as e:

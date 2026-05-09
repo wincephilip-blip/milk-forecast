@@ -388,10 +388,10 @@ plt.close()
 print('Saved fig3_model_comparison.png')
 
 # ============================================================
-# FIGURE 4 — Cohort diagnostic + 2024 waterfall (2 panels)
+# FIGURE 4 — Cohort diagnostic + 2024 waterfall + multi-horizon (3 panels)
 # ============================================================
-fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
-ax_a, ax_b = axes
+fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
+ax_a, ax_b, ax_c = axes
 
 # (a) Cohort 4 years pred vs actual
 yrs4 = [2021, 2022, 2023, 2024]
@@ -467,6 +467,29 @@ legend_p = [
     mpatches.Patch(color=C_STRUCT, label='Final prediction'),
 ]
 ax_b.legend(handles=legend_p, loc='upper left', fontsize=7)
+
+# (c) Multi-horizon MAPE: cohort 結構式於 12/24/36 個月之精度
+horizons = [12, 24, 36]
+mape_vals = [2.15, 1.70, 1.12]
+bias_vals = [1.45, 0.52, 0.13]
+n_holdouts = [4, 3, 2]
+x_h = np.arange(len(horizons))
+w_h = 0.38
+b1 = ax_c.bar(x_h - w_h/2, mape_vals, w_h, color=C_STRUCT, edgecolor='black', label='MAPE (%)')
+b2 = ax_c.bar(x_h + w_h/2, bias_vals, w_h, color=C_OK, edgecolor='black', label='Bias (%, signed)')
+ax_c.axhline(0, color='black', linewidth=0.7)
+for i, (m, b, n) in enumerate(zip(mape_vals, bias_vals, n_holdouts)):
+    ax_c.text(i - w_h/2, m + 0.08, f'{m:.2f}', ha='center', fontsize=8.5, fontweight='bold')
+    ax_c.text(i + w_h/2, b + 0.08 if b >= 0 else b - 0.18,
+               f'{b:+.2f}', ha='center', fontsize=8.5, fontweight='bold')
+    ax_c.text(i, -0.5, f'n={n}', ha='center', fontsize=8, color='gray', style='italic')
+ax_c.set_xticks(x_h)
+ax_c.set_xticklabels([f'{h} months' for h in horizons])
+ax_c.set_ylabel('Error (%)')
+ax_c.set_title('(c) Multi-horizon accuracy (12/24/36 months)', loc='left', fontweight='bold')
+ax_c.set_ylim(-1, 3.0)
+ax_c.legend(loc='upper right', fontsize=8)
+ax_c.grid(axis='y', alpha=0.3)
 
 plt.tight_layout()
 plt.savefig(OUT / 'fig4_cohort_diagnostic.png', dpi=DPI_OUT, bbox_inches='tight')

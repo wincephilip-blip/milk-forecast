@@ -437,6 +437,59 @@ def _build_context(manifest, results, official_compare, holdout):
         ]
         ctx["cohort_baseline"] = cohort_baseline
 
+    # === Cohort v2 baseline（工程改善版本、與 v1 並列）===
+    # v2 採 n_projection='quarterly' + r_window='adaptive' + as_of=today（auto nowcast）
+    try:
+        from ..forecast.cohort_model_v2 import forecast_cohort_v2
+        from datetime import date
+        target_year_v2 = ctx.get("target_year") or (
+            pd.Timestamp(ref_date).year + 1 if ref_date else None)
+        if target_year_v2:
+            v2_r = forecast_cohort_v2(
+                target_year=target_year_v2,
+                n_projection='quarterly',
+                r_window='adaptive',
+                as_of_date=date.today().isoformat(),
+                nowcast_mode='auto')
+            if v2_r.get("success"):
+                # 從 holdout 抓 v2 殘差 bias
+                v2_bias = 0.0
+                if holdout and holdout.get("summary", {}).get("by_model_mape"):
+                    v2_info = holdout["summary"]["by_model_mape"].get("cohort_v2_auto", {})
+                    v2_bias = v2_info.get("bias", 0.0) or 0.0
+                v2_static_factor = 1 - v2_bias / 100.0
+                v2_baseline = {
+                    "cows": v2_r.get("predicted_cows"),
+                    "daily_yield_kg": v2_r.get("predicted_daily_yield_kg"),
+                    "lactation_days": 305,
+                    "tons_after_productivity": v2_r.get("annual_total_tons"),
+                    "tons_raw": v2_r.get("annual_total_tons_raw"),
+                    "productivity_ratio": v2_r.get("productivity_ratio_target", 1.0),
+                    "productivity_correction_applied": v2_r.get(
+                        "productivity_correction_applied", True),
+                    "target_year": target_year_v2,
+                    "in_sample_mape": v2_r.get("in_sample_mape"),
+                    "static_bias_pct": v2_bias,
+                    "static_calibration_factor": v2_static_factor,
+                    "annual_total_tons": v2_r.get("annual_total_tons") * v2_static_factor,
+                    "v2_config": v2_r.get("v2_config", {}),
+                    "seasonal_pattern": [
+                        0.080, 0.082, 0.085, 0.087, 0.086, 0.084,
+                        0.082, 0.082, 0.080, 0.081, 0.083, 0.085,
+                    ],
+                }
+                ctx["cohort_v2_baseline"] = v2_baseline
+                import logging
+                logging.getLogger("milkfc.dashboard").info(
+                    f"  Cohort v2 baseline: {v2_baseline['annual_total_tons']:,.0f} 公噸 "
+                    f"(static_bias={v2_bias:+.2f}%, "
+                    f"as_of={date.today().isoformat()}, "
+                    f"nowcast_quarters={v2_baseline['v2_config'].get('nowcast_mode_actual')})")
+    except Exception as e:
+        import logging
+        logging.getLogger("milkfc.dashboard").warning(
+            f"  Cohort v2 baseline 計算失敗、dashboard 將不顯示 v2 選項: {e}")
+
     return ctx
 
 
@@ -543,6 +596,8 @@ def _render(p: dict) -> str:
     <label>主要模型 / Model:</label>
     <select id="sel_model">
       <option value="__best__" selected>最佳 / Best (auto)</option>
+      <option value="cohort_simple">結構式 v1 simple（論文版本）</option>
+      <option value="cohort_v2_auto">結構式 v2 auto（工程改善版本）</option>
       <option value="ensemble">Ensemble</option>
       <option value="stl_linear">stl_linear</option>
       <option value="holt_winters">holt_winters</option>
@@ -550,8 +605,11 @@ def _render(p: dict) -> str:
       <option value="prophet">prophet</option>
       <option value="naive_seasonal">naive_seasonal</option>
       <option value="neural_prophet">neural_prophet</option>
-      <option value="cohort_simple">cohort_simple</option>
     </select>
+  </div>
+  <div class="paper-version-banner" style="background:#fff8e1;border-left:4px solid #ffa726;padding:10px 14px;margin:12px 0;font-size:13px;border-radius:4px;">
+    📜 <b>論文版本</b>：cohort_simple（4 年滾動回測 MAPE 2.15%）。
+    <span style="color:#666">本論文於中國畜牧學會誌投稿之凍結版本；下拉切換 cohort_v2_auto 可比對工程改善之 v2 版本（MAPE 1.77%）。</span>
   </div>
   <div class="chart-wrap" style="height:380px;"><canvas id="ts_chart"></canvas></div>
   <div class="chart-controls">
@@ -1031,15 +1089,16 @@ function renderExecutiveSummary() {{
           ${{(() => {{
             const desc = {{
               'stl_linear': 'STL 分解（趨勢 + 季節）+ 線性外推',
-              'cohort_simple': '結構式公式：產乳牛數 × 單頭日產乳 × 305 天 ÷ DHI/全國 productivity 比率',
+              'cohort_simple': '結構式 v1（論文版本）：產乳牛數 × 單頭日產乳 × 305 天 ÷ DHI/全國 productivity 比率',
+              'cohort_v2_auto': '結構式 v2（工程改善版）：N 季度回歸 + r ensemble (5yr OLS + 3yr mean) + auto nowcast',
               'neural_prophet': 'Prophet + AR-Net 神經網路（學最近 12 期 autoregressive 訊號）',
               'holt_winters': '三重指數平滑（level + trend + seasonal）',
-              'sarima': 'SARIMA(1,1,1)(1,1,1,12) 季節 ARIMA',
+              'sarima': 'pmdarima auto_arima（KPSS+OCSB+AIC 自動選階）',
               'prophet': 'Facebook Prophet（trend + yearly seasonal + changepoint）',
               'naive_seasonal': '基準線：去年同月 × 年增率',
               'ensemble': '加權平均集成（權重 = 1/MAPE）',
             }}[bestM] || '依資料推算';
-            const isCohort = bestM === 'cohort_simple';
+            const isCohort = (bestM === 'cohort_simple' || bestM === 'cohort_v2_auto');
             const sfPart = isCohort
               ? '不需 SF 還原（cohort 直接全國尺度）'
               : `尺度校正方法 <b>Level 4 SF</b>（Scale Factor、涵蓋率還原係數）：${{sfTgt ? `SF[${{tgt}}] = ${{sfTgt.official_farms.toFixed(0)}} / ${{sfTgt.dhi_farms.toFixed(0)}} = <b>${{sfTgt.sf.toFixed(3)}}</b>（農業部公告場數 ÷ DHI 場數）` : '從歷史外推至目標年'}}`;
@@ -1200,23 +1259,24 @@ function renderExecutiveSummary() {{
     (() => {{
       const desc = {{
         'stl_linear': 'STL 分解（趨勢 + 季節）+ 線性外推',
-        'cohort_simple': '結構式公式：產乳牛數 × 單頭日產乳 × 305 天 ÷ DHI/全國 productivity 比率',
+        'cohort_simple': '結構式 v1（論文版本）：產乳牛數 × 單頭日產乳 × 305 天 ÷ DHI/全國 productivity 比率',
+        'cohort_v2_auto': '結構式 v2（工程改善版）：N 季度回歸 + r ensemble (5yr OLS + 3yr mean) + auto nowcast',
         'neural_prophet': 'Prophet + AR-Net 神經網路',
         'holt_winters': '三重指數平滑',
-        'sarima': 'SARIMA(1,1,1)(1,1,1,12)',
+        'sarima': 'pmdarima auto_arima（KPSS+OCSB+AIC）',
         'prophet': 'Facebook Prophet',
         'naive_seasonal': '基準線：去年同月 × 年增率',
         'ensemble': '加權平均集成',
       }}[bestM] || '依資料推算';
       return `‧ 主要模型：${{bestM}}（${{desc}}、系統依 4 年 holdout backtest 滾動回測自動選出）`;
     }})(),
-    bestM === 'cohort_simple'
+    (bestM === 'cohort_simple' || bestM === 'cohort_v2_auto')
       ? `‧ 尺度：cohort 直接全國尺度（不需 SF 還原）`
       : `‧ 尺度校正方法：Level 4 SF（Scale Factor、涵蓋率還原係數）—— 最新季報 + 年報外推到目標年`,
-    (bestM !== 'cohort_simple' && sfTgt) ? `‧ 本次 SF[${{tgt}}] = ${{sfTgt.official_farms.toFixed(0)}} ÷ ${{sfTgt.dhi_farms.toFixed(0)}} = ${{sfTgt.sf.toFixed(3)}}（農業部公告場數 ÷ DHI 場數）` : '',
+    (bestM !== 'cohort_simple' && bestM !== 'cohort_v2_auto' && sfTgt) ? `‧ 本次 SF[${{tgt}}] = ${{sfTgt.official_farms.toFixed(0)}} ÷ ${{sfTgt.dhi_farms.toFixed(0)}} = ${{sfTgt.sf.toFixed(3)}}（農業部公告場數 ÷ DHI 場數）` : '',
     ``,
     `■ 歷史精度（4 年滾動回測）`,
-    bestM === 'cohort_simple'
+    (bestM === 'cohort_simple' || bestM === 'cohort_v2_auto')
       ? `‧ 系統採用模型 ${{bestM}} 全管線 MAPE = ${{bestMape}}%（結構式公式、含 productivity 校正）`
       : `‧ 系統採用模型 ${{bestM}} 全管線 MAPE = ${{bestMape}}%（時序預測 + Level 4 SF 還原）`,
     `‧ Bias（系統性偏差）= ${{bestBias}}%（${{CTX.best_bias>=0 ? '系統性略高估' : '系統性略低估'}}、已於正式預測自動扣除）`,
@@ -2209,7 +2269,8 @@ function drawWhatIfResults() {{
       const altLabel = ({{
         'stl_linear': 'stl_linear（純時序、均值回歸）',
         'neural_prophet': 'neural_prophet（神經網路 AR）',
-        'cohort_simple': 'cohort_simple（結構式）',
+        'cohort_simple': 'cohort_simple（結構式 v1、論文版本）',
+        'cohort_v2_auto': 'cohort_v2_auto（結構式 v2、N 季度+r ensemble+auto nowcast）',
         'holt_winters': 'holt_winters（指數平滑）',
         'sarima': 'sarima（季節 ARIMA）',
         'prophet': 'prophet（Facebook Prophet）',
@@ -2525,7 +2586,7 @@ SF[Y] = 估計農業部公告場數[Y] / 估計 DHI 場數[Y]
 
   // Case Study: 預測 target year
   const _bm = CTX.best_model || '主要模型';
-  const _isCohort = _bm === 'cohort_simple';
+  const _isCohort = (_bm === 'cohort_simple' || _bm === 'cohort_v2_auto');
   let caseHTML = `<p><b>輸入</b>：基準日 ${{cfg.reference_date || '—'}} 之前的 DHI 月度資料 + 在養量資料</p>`;
   caseHTML += `<p><b>步驟</b>：</p><ol>`;
   if (_isCohort) {{
@@ -2591,6 +2652,7 @@ const COLORS = {{
   prophet: '#d05a3c',
   neural_prophet: '#e91e63',
   cohort_simple: '#00897b',
+  cohort_v2_auto: '#1e88e5',
   ensemble: '#2a4d69',
 }};
 
@@ -2602,6 +2664,7 @@ const MODEL_DESC = {{
   prophet: 'Facebook Prophet',
   neural_prophet: 'NeuralProphet（Prophet + AR-Net 神經網路）',
   cohort_simple: 'Cohort 結構：產乳牛 × 單頭日產乳 × 305 天',
+  cohort_v2_auto: 'Cohort v2：N 季度回歸 + r ensemble (5yr OLS+3yr mean) + auto nowcast',
   ensemble: '加權集成（用 in-sample MAPE 倒數）',
 }};
 
@@ -2872,6 +2935,39 @@ function renderRegion() {{
           <div class="pt-calc-step">
             <span class="pt-calc-form">× ${{sf.toFixed(4)}} (1 − ${{(cb.static_bias_pct||0).toFixed(2)}}% holdout 殘差校正)</span>
             <span class="pt-calc-eq pt-calc-final">= <b>${{fmtTons(final*1000)}}</b><span class="pt-calc-anno">（按月度季節形狀拆 12 月後加總略有 round-off）</span></span>
+          </div>
+        </div>`;
+      }}
+
+      // === cohort_v2_auto：v2 結構式（n=quarterly + r=adaptive ensemble）===
+      if (modelName === 'cohort_v2_auto') {{
+        const cb = CTX.cohort_v2_baseline;
+        if (!cb) return '<div class="pt-calc-empty">cohort v2 baseline 資料不可用（pipeline 尚未產出 v2）</div>';
+        const cows = cb.cows;
+        const yld = cb.daily_yield_kg;
+        const days = cb.lactation_days || 305;
+        const ratio = cb.productivity_ratio || 1.0;
+        const sf = cb.static_calibration_factor || 1.0;
+        const raw = cows * yld * days / 1000;
+        const afterProd = raw / ratio;
+        const final = afterProd * sf;
+        const cfg = cb.v2_config || {{}};
+        return `<div class="pt-calc">
+          <div class="pt-calc-h">📐 cohort_v2_auto 結構式公式（工程改善版本、不走 SF）</div>
+          <div class="pt-calc-step" style="background:#fff8e1;padding:6px 10px;border-radius:4px;margin-bottom:8px;font-size:12px;color:#666">
+            <b>v2 配置</b>：N 投影 = ${{cfg.n_projection}}、r 投影 = ${{cfg.r_window}}、as_of = ${{cfg.as_of_date || 'today'}}
+          </div>
+          <div class="pt-calc-step">
+            <span class="pt-calc-form">${{Math.round(cows).toLocaleString()}} 頭 (季度回歸) × ${{yld.toFixed(2)}} kg × ${{days}} 天 ÷ 1000</span>
+            <span class="pt-calc-eq">= <b>${{fmtTons(raw*1000)}}</b><span class="pt-calc-anno">（v2 公式原始值）</span></span>
+          </div>
+          <div class="pt-calc-step">
+            <span class="pt-calc-form">÷ ${{ratio.toFixed(4)}} (r ensemble: 5yr OLS + 3yr mean 平均)</span>
+            <span class="pt-calc-eq">= <b>${{fmtTons(afterProd*1000)}}</b></span>
+          </div>
+          <div class="pt-calc-step">
+            <span class="pt-calc-form">× ${{sf.toFixed(4)}} (1 − ${{(cb.static_bias_pct||0).toFixed(2)}}% holdout 殘差校正)</span>
+            <span class="pt-calc-eq pt-calc-final">= <b>${{fmtTons(final*1000)}}</b></span>
           </div>
         </div>`;
       }}
@@ -3454,7 +3550,7 @@ function renderHoldoutBacktest() {{
   </div>`;
 
   // 偵測 best_model 是否為 cohort（cohort 不走 SF、直接 national 尺度）
-  const bestIsCohort = (bestM === 'cohort_simple');
+  const bestIsCohort = (bestM === 'cohort_simple' || bestM === 'cohort_v2_auto');
   const bestColLabel = bestIsCohort
     ? `cohort 結構式（不走 SF）`
     : `${{bestM || '—'}} × L4`;
@@ -3503,8 +3599,10 @@ function renderHoldoutBacktest() {{
     // 系統採用模型逐年：cohort 用結構式直出、其他模型 × L4 SF
     let bmFull = null, bmErr = null;
     if (bestIsCohort) {{
-      // cohort_simple 直接全國尺度（已套 productivity 校正）
-      if (r.cohort_predicted_tons != null) {{
+      // cohort_simple / cohort_v2_auto 直接全國尺度（已套 productivity 校正）
+      if (bestM === 'cohort_v2_auto' && r.cohort_v2_predicted_tons != null) {{
+        bmFull = r.cohort_v2_predicted_tons;
+      }} else if (r.cohort_predicted_tons != null) {{
         bmFull = r.cohort_predicted_tons;
       }}
     }} else {{
