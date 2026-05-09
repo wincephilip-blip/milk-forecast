@@ -118,22 +118,26 @@ EOF
 # 加 .nojekyll（避免 GitHub Pages 走 Jekyll、影響底線開頭的檔名）
 touch "$DEPLOY_DIR/.nojekyll"
 
-# Git push（force、shallow）
+# Git push（force、shallow）→ gh-pages branch
+# 注意：force-push 到 gh-pages、不動 main（main 留給原始碼）
 cd "$DEPLOY_DIR"
 git init -q
-git checkout -q -B main
+git checkout -q -B gh-pages
 git add .
 git -c user.email="deploy@local" -c user.name="deploy" \
     commit -q -m "Auto-deploy $(date '+%Y-%m-%d %H:%M')"
 
-echo "▶ Push 到 $GIT_REPO ..."
-git push -fq "$GIT_REPO" main
+echo "▶ Push 到 $GIT_REPO（branch: gh-pages）..."
+git push -fq "$GIT_REPO" gh-pages
 
 echo
 echo "✅ 部署完成（$copied_count 個儀表板）"
 echo
 echo "下一步："
 echo "  1. 到 GitHub repo Settings → Pages"
-echo "  2. Source 選 'Deploy from a branch'、Branch 'main' / '/(root)'、按 Save"
+echo "  2. Source 選 'Deploy from a branch'、Branch 'gh-pages' / '/(root)'、按 Save"
 echo "  3. 等 1-2 分鐘、訪問你的 GitHub Pages URL"
 echo "     (預設格式：https://你的帳號.github.io/repo-名稱)"
+echo
+echo "ℹ 設計說明：本腳本只動 gh-pages branch、不動 main。"
+echo "   main = 原始碼來源、gh-pages = dashboard 部署快照、兩者完全分離。"
